@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+base_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+vm1_ssh="${FLOWSHIFT_SENDER_SSH:-zealot@192.168.56.11}"
+vm2_ssh="${FLOWSHIFT_RECEIVER_SSH:-zealot@192.168.56.12}"
+vm1_data_ip="${FLOWSHIFT_SENDER_IP:-10.10.0.1}"
+vm2_data_ip="${FLOWSHIFT_RECEIVER_IP:-10.10.0.2}"
+remote_dir="${FLOWSHIFT_REMOTE_DIR:-/mnt/flowshift}"
+remote_flowshift="$remote_dir/flowshift"
+ssh_options=(-o BatchMode=yes -o ConnectTimeout=5)
+
+usage() {
+    echo "Usage: $0 --file {500mb|1gb|2gb} SOURCE_FILE" >&2
+    echo "       $0 --stream {60s|120s|180s} VIDEO_FILE" >&2
+}
+
+if [[ $# -ne 3 ]]; then
+    usage
+    exit 2
+fi
+case "$1:$2" in
+    --file:500mb|--file:1gb|--file:2gb)
+        config_name="file-transfer-$2.json"
+        command=send
+        ;;
+    --stream:60s|--stream:120s|--stream:180s)
+        config_name="streaming-$2-720p.json"
+        command=stream-send
+        ;;
+    *) usage; exit 2 ;;
+esac
+input_file="$3"
+"$base_dir/flowshift" inspect --config "$base_dir/configs/$config_name" >/dev/null
+for target in "$vm1_ssh" "$vm2_ssh"; do
+    if ! ssh "${ssh_options[@]}" "$target" true; then
+        echo "Cannot reach $target with SSH key authentication." >&2
+        exit 1
+    fi
+done
+printf -v check_command '%q ' test -f "$input_file"
+if ! ssh "${ssh_options[@]}" "$vm1_ssh" "$check_command"; then
+    echo "Input is not visible inside VM1: $input_file" >&2
+    exit 1
+fi
+receiver=("$remote_flowshift" receive --bind "$vm2_data_ip" --port 9443 --output-dir received)
+if [[ "$command" == stream-send ]]; then
+    if ! ssh "${ssh_options[@]}" "$vm1_ssh" command -v ffmpeg >/dev/null ||
+       ! ssh "${ssh_options[@]}" "$vm2_ssh" command -v ffplay >/dev/null; then
+        echo "Streaming requires FFmpeg on VM1 and FFplay on VM2." >&2
+        exit 1
+    fi
+    if ! ssh "${ssh_options[@]}" "$vm2_ssh" test -S /run/user/1000/wayland-0; then
+        echo "Log in to the VM2 Wayland desktop before starting playback." >&2
+        exit 1
+    fi
+    receiver=(env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0
+              SDL_VIDEODRIVER=wayland PULSE_SERVER=unix:/run/user/1000/pulse/native
+              "${receiver[@]}" --play)
+fi
+printf -v receiver_command '%q ' "${receiver[@]}"
+printf -v sender_command '%q ' "$remote_flowshift" "$command" "$input_file" \
+    --host "$vm2_data_ip" --bind "$vm1_data_ip" --port 9443 --config "$remote_dir/configs/$config_name"
+ssh "${ssh_options[@]}" "$vm2_ssh" "$receiver_command" &
+receiver_pid=$!
+cleanup() {
+    kill "$receiver_pid" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+sleep 1
+ssh "${ssh_options[@]}" "$vm1_ssh" "$sender_command"
+wait "$receiver_pid"
+trap - EXIT INT TERM
+echo "Completed. Restored output: $vm2_ssh:~/received/"

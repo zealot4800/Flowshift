@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Export the FlowShift configuration evaluated in simulation for the live VM policy.
+
+The selected variants and target ranking are read from the environment's
+reports/comparison metrics.json (what was validated and tested); size and gap
+distributions and decoy templates are rebuilt with the same seed. Templates keep
+only sender-to-receiver packets, since the live tunnel carries one direction.
+"""
+import argparse
+import json
+from pathlib import Path
+import sys
+
+import numpy as np
+import yaml
+
+ROOT = Path(__file__).resolve().parent
+PROJECT = ROOT.parent
+sys.path.insert(0, str(PROJECT / "src"))
+from obfuscators.flowshift import build_profiles  # noqa: E402
+from workload import load  # noqa: E402
+
+# The live workloads and the dataset class each one belongs to.
+WORKLOADS = {"file-transfer": "File Transfer", "streaming": "Streaming"}
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--config", default=str(PROJECT / "configs" / "vnat.yaml"))
+parser.add_argument("--environment", default="Non VPN")
+parser.add_argument("--templates", type=int, default=5, help="decoy templates kept per service")
+parser.add_argument("--output", default=str(ROOT / "configs" / "flowshift-profile.json"))
+args = parser.parse_args()
+
+config_path = Path(args.config).resolve()
+config = yaml.safe_load(config_path.read_text())
+folder = (config_path.parent / config["data"]["root"]).resolve()
+classes = config["data"]["categories"]
+base = config["obfuscators"]["flowshift"]
+metrics = json.loads((PROJECT / "reports" / "comparison" / folder.name
+                      / args.environment.replace(" ", "_") / "metrics.json").read_text())
+entry = metrics["policies"]["flowshift"]
+chosen = base["candidates"].index(entry["candidate"])
+calibration = entry["calibration"][chosen]
+settings = {**base, **entry["candidate"]}
+
+flows, labels, _ = load(folder / args.environment, "train")
+profiles = build_profiles(settings, flows, labels, len(classes),
+                          np.random.default_rng(settings["random_seed"]))
+templates = {str(c): [[[int(t), int(size)] for t, direction, size in
+                       zip(np.rint(flow[:, 0] / 1e6), flow[:, 1], flow[:, 2]) if direction == 0]
+                      for flow in profiles["templates"][c][:args.templates]]
+             for c in range(len(classes))}
+profile = dict(
+    source=f"{folder.name}/{args.environment}", classes=classes,
+    workload_services={kind: classes.index(name) for kind, name in WORKLOADS.items()},
+    interval_ms=settings["interval_ms"], overhead_share=settings["overhead_share"],
+    overhead_floor_bytes=settings["overhead_floor_bytes"],
+    policies=calibration["selected"], rank=calibration["target_rank"],
+    sizes=np.round(profiles["sizes"], 1).tolist(),
+    gaps_ms=np.round(profiles["gaps"] / 1e6, 4).tolist(), templates=templates)
+Path(args.output).write_text(json.dumps(profile) + "\n")
+print(f"{args.output}: {profile['source']}, template_bytes {entry['candidate']}, "
+      f"{len(profile['policies'])} policies, rank {profile['rank']}, "
+      f"templates {[len(v) for v in templates.values()]}")

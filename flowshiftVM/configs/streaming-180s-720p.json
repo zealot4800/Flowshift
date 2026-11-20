@@ -1,0 +1,129 @@
+{
+  "workload_type": "streaming",
+  "profile": "180s-720p",
+  "duration_seconds": 180,
+  "width": 1280,
+  "height": 720,
+  "video_bitrate_kbps": 1200,
+  "audio_bitrate_kbps": 96,
+  "controller": {
+    "byte_fraction": 0.01,
+    "credit_cap": 4096,
+    "initial_credit": 0,
+    "max_delay_ms": 20.0,
+    "deadline_guard_ms": 1.0,
+    "queue_bytes": 65536,
+    "frame_bytes": 1400,
+    "mtu": 1500,
+    "transport_header_bytes": 60,
+    "byte_reference": 1400,
+    "byte_weight": 0.05,
+    "delay_weight": 0.5,
+    "queue_weight": 0.1,
+    "size_edges": [
+      256,
+      768,
+      1400
+    ],
+    "iat_edges_ms": [
+      0.1,
+      1.0,
+      5.0,
+      20.0
+    ],
+    "burst_edges": [
+      1,
+      4,
+      16
+    ],
+    "burst_gap_ms": 5.0,
+    "feature_weights": [
+      0.5,
+      0.3,
+      0.2
+    ],
+    "envelopes": [
+      {
+        "window": 1,
+        "weight": 1.0,
+        "size": [
+          0.2,
+          0.3,
+          0.5,
+          0.0
+        ],
+        "iat": [
+          0.15,
+          0.25,
+          0.3,
+          0.2,
+          0.1
+        ],
+        "burst": [
+          0.3,
+          0.4,
+          0.25,
+          0.05
+        ]
+      },
+      {
+        "window": 16,
+        "weight": 1.0,
+        "size": [
+          0.2,
+          0.3,
+          0.5,
+          0.0
+        ],
+        "iat": [
+          0.15,
+          0.25,
+          0.3,
+          0.2,
+          0.1
+        ],
+        "burst": [
+          0.3,
+          0.4,
+          0.25,
+          0.05
+        ]
+      },
+      {
+        "window": 128,
+        "weight": 1.0,
+        "size": [
+          0.2,
+          0.3,
+          0.5,
+          0.0
+        ],
+        "iat": [
+          0.15,
+          0.25,
+          0.3,
+          0.2,
+          0.1
+        ],
+        "burst": [
+          0.3,
+          0.4,
+          0.25,
+          0.05
+        ]
+      }
+    ],
+    "padding_sizes": [
+      256,
+      768,
+      1400
+    ],
+    "dummy_size": 256,
+    "pacing_ms": [
+      1.0,
+      5.0
+    ],
+    "fragmentation": true,
+    "coalesce_ms": 5.0
+  }
+}
