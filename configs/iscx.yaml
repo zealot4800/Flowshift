@@ -1,0 +1,226 @@
+# Flowshift: compare traffic-shaping policies on three-stream tunnels.
+# Read by src/train_mlp.py (attacker) and src/evaluate.py (policy comparison).
+
+data:
+  # Capture-disjoint train/val/test splits as packet-npz-v1 archives
+  # (nanosecond times; direction 0 is the direction of a flow's first packet).
+  root: ../dataset/CIC-ISCX
+  environments:
+  - Non VPN
+  - VPN
+  # Order of the class-presence outputs.
+  categories:
+  - Chat
+  - VoIP
+  - File Transfer
+  - Streaming
+
+# Reference attacker: multi-label MLP with one presence output per class.
+model:
+  hidden_layer_candidates: [[64, 32], [128, 64], [256, 128]]
+  # Passed to sklearn's MLPClassifier.
+  estimator:
+    activation: relu
+    solver: adam
+    alpha: 0.0001
+    batch_size: 256
+    learning_rate_init: 0.001
+    random_state: 20261116
+  # Signed log1p, then standardization fitted on training tunnels only.
+  preprocessing:
+    minimum_scale: 0.00000001
+    clip: [-6.0, 6.0]
+  training:
+    # Fitted on identity-shim training tunnels, selected on validation tunnels.
+    selection_metric: exact_match
+    max_epochs: 250
+    patience: 25
+    min_delta: 0.0001
+    threads: 4
+  output_root: ../reports/tunnelModel
+
+# What the observer computes from a tunnel's wire trace.
+feature_extraction:
+  # false: 284 size and timing features. true: plus 100 direction, volume,
+  # burst and fixed-window features (384).
+  directional: true
+  # Window of the fixed-time bins; keep equal to shim.observation_seconds.
+  observation_seconds: 20.0
+  std_ddof: 0
+  quantile_method: linear
+  size:
+    # Packet-size histogram, as a fraction of packets.
+    histogram:
+      first_edge_bytes: 0
+      last_edge_bytes: 1525
+      bin_width_bytes: 25
+    quantile_percentiles: [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    quantile_scale_bytes: 1500
+    mean_std_scale_bytes: 1500
+    small_max_bytes: 128
+    large_min_bytes: 1000
+    # First packet sizes; missing positions take padding_bytes.
+    prefix: {length: 128, padding_bytes: -1, scale_bytes: 1500}
+    # Size-category transitions between consecutive packets.
+    transitions:
+      edges_bytes: [128, 256, 512, 1000]
+      upper_edge_inclusive: true
+  timing:
+    # Inter-arrival times in seconds.
+    quantile_percentiles: [0, 10, 25, 50, 75, 90, 95, 99, 100]
+    # Histogram of log10(1 + gap in ns), as a fraction of gaps.
+    histogram:
+      first_edge: 0.0
+      last_edge: 19.0
+      edge_count: 39
+
+# Processes used to simulate tunnels.
+workers: 8
+# Everything the policies share: traffic interpretation, framing, packets and link.
+shim:
+  streams_per_tunnel: 3
+  # All streams of a tunnel start at 0 and flows last under 15 s; the observer
+  # watches until 20 s so queued data can finish.
+  arrival_seconds: 15.0
+  observation_seconds: 20.0
+  # Frame header: stream ID, type, valid length, message and offset metadata.
+  frame_header_bytes: 8
+  # TLS 1.3 record: 5-byte header, 1-byte content type, 16-byte tag.
+  encryption_bytes: 22
+  transport_header_bytes: 40
+  mtu_bytes: 1500
+  link_mbps: 1000.0
+workload:
+  seed: 2026
+  # Tunnels per class subset in each split; rare classes may yield fewer.
+  rounds: {train: 300, val: 50, test: 50}
+  max_flow_reuse: 10
+evaluation:
+  output_root: ../reports/comparison
+  # Seeds of policy randomness on the test tunnels; the workload stays fixed.
+  seeds: [1, 2, 3]
+  # A candidate qualifies when all payload completes within these limits,
+  # both measured against the identity shim on the validation tunnels.
+  budget: {overhead_percent: 10.0, added_p99_delay_ms: 100.0}
+  # Among candidates within budget, the cheapest whose exact match is within
+  # this many points of the lowest is tested (0 picks the lowest outright).
+  selection_margin: 0.02
+# Shaping policies. Each lists candidate settings; evaluate.py picks one per
+# policy on validation tunnels, within evaluation.budget.
+obfuscators:
+  minos:
+    # Padding and dummies run while fewer streams than this are active (paper: 4).
+    flow_threshold: 4
+    flow_timeout_ms: 1000.0
+    # Website-fingerprinting defense (Minos Section 8.2): a dummy follows a packet
+    # with probability 0.6 within each stream's first W packets; no padding.
+    padding_bytes: [0, 0]
+    dummy_probability: 0.6
+    dummy_window_packets: 500
+    dummy_bytes: [0, 1400]
+    candidates:
+    - {dummy_window_packets: 500}
+    - {dummy_window_packets: 1000}
+    # IoT case (Minos Appendix A): padding of 16 bytes on average, no dummies.
+    - {dummy_probability: 0.0, padding_bytes: [0, 32]}
+  ditto:
+    # Per-packet Ditto as the Securitas paper simulates it: pad each chunk to the
+    # next pattern state, chaff empty states while traffic is queued. Pattern
+    # states are size percentiles of the training chunks (Ditto Eq. 2); the Ditto
+    # paper finds lengths 3 to 6 efficient.
+    candidates:
+    - {pattern_length: 3}
+    - {pattern_length: 4}
+    - {pattern_length: 6}
+  securitas:
+    random_seed: 2026
+    # The paper acts on the user's outbound packets only.
+    both_directions: false
+    # Paper defaults: Pr = 0.7 splits versus insertions, at most M = 88 bytes.
+    split_probability: 0.7
+    max_action_bytes: 88
+    # ICMP time-exceeded replies to dummies: measured reply probability 0.48, and
+    # 56 bytes (20-byte IP header, 8-byte ICMP header, 28 quoted bytes).
+    reply_probability: 0.48
+    reply_bytes: 56
+    # One action per chunk position within a stream; the paper pads sequences
+    # to a fixed length of 2K packets.
+    strategy_length: 2000
+    # Strategy search (paper Section 5.2): a 32-unit LSTM trained by policy
+    # gradient against a separate proxy classifier fitted on training tunnels
+    # (`attacker` would be the paper's ideal Securitas*). Paper: learning rate
+    # 0.001, batch 256; its ~500 epochs are cut to a CPU-sized number of steps.
+    guide: proxy
+    proxy_max_epochs: 500
+    hidden_units: 32
+    training_steps: 400
+    batch_size: 256
+    learning_rate: 0.001
+    similarity_weight: 0.1
+    entropy_weight: 0.001
+    objective: true_confidence
+    overhead_weight: 1.0
+    candidates:
+    - {strategy: random}
+    - {strategy: learned}
+  blanket:
+    # Blind adversarial perturbations (src/obfuscators/blanket.py). A generator
+    # (paper: one hidden layer of 500 ReLU units) maps a random trigger to
+    # perturbations of the first `length` chunk positions (paper: 5000).
+    random_seed: 2026
+    trigger_size: 16
+    hidden_units: 500
+    length: 5000
+    # Remapping budgets: alpha dummy records, padding of at most max_pad_bytes per
+    # chunk and pad_budget_bytes per tunnel (N, n of Alg. 3), Laplace jitter.
+    inserts: 500
+    max_pad_bytes: 64
+    pad_budget_bytes: 50000
+    delay_ms: 10.0
+    # Offline training against a separate proxy MLP fitted on training tunnels
+    # (`attacker` is the paper's white-box setting). Adam at the paper's 0.001;
+    # gradients through the simulator by antithetic finite differences of this
+    # scale in the generator's output.
+    guide: proxy
+    training_steps: 300
+    batch_size: 32
+    learning_rate: 0.001
+    smoothing: 0.5
+    candidates:
+    - {training_steps: 0}
+    - {inserts: 250}
+    - {inserts: 500}
+    - {inserts: 1000}
+  flowshift:
+    # This work (src/obfuscators/flowshift.py). The seeded generator holds each
+    # policy and target service for dt_k ~ U[interval_ms] (eq. 8).
+    random_seed: 2026
+    interval_ms: [500, 2000]
+    # Hard cost cap: padding and dummies never exceed the floor plus this share of
+    # the real wire bytes sent so far in the tunnel.
+    overhead_share: 0.05
+    overhead_floor_bytes: 120000
+    # Target profiles: up to template_count training flows per service, each no
+    # larger than template_bytes (a candidate setting below).
+    template_count: 50
+    # Policy selection, within evaluation.budget, on tunnels built from a held-out
+    # quarter of the training captures (rounds as in workload.rounds); of the
+    # variants whose proxy displacement is within this share of the best, the
+    # cheapest are rotated.
+    tps_rounds: 40
+    displacement_slack: 0.05
+    # Candidate policies p = (S, T, V). V: share of the target flow replayed as
+    # decoys, imitating one random absent service, the one most effective per
+    # decoy byte (best), or all of them. S: pad toward the target size by at most
+    # max_pad_bytes (never fragment). T: longest hold.
+    variants:
+    - {decoy: 1.0, targets: best, size_mapping: false, max_pad_bytes: 0, hold_ms: 0}
+    - {decoy: 1.0, targets: best, size_mapping: true, max_pad_bytes: 64, hold_ms: 0}
+    - {decoy: 1.0, targets: all, size_mapping: false, max_pad_bytes: 0, hold_ms: 0}
+    - {decoy: 1.0, targets: all, size_mapping: true, max_pad_bytes: 64, hold_ms: 0}
+    - {decoy: 1.0, targets: all, size_mapping: true, max_pad_bytes: 256, hold_ms: 0}
+    - {decoy: 1.0, targets: all, size_mapping: true, max_pad_bytes: 64, hold_ms: 20}
+    candidates:
+    - {template_bytes: 300000}
+    - {template_bytes: 1000000}
+    - {template_bytes: 3000000}
